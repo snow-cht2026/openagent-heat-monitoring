@@ -1,0 +1,25 @@
+database:
+  # SQLite by default; swap for postgresql+psycopg://user:pass@host/db later.
+  url: sqlite:///data/monitoring.db
+
+github:
+  # Read from this environment variable. Empty/absent -> anonymous (60 req/h).
+  token_env: GITHUB_TOKEN
+  per_page: 100
+  timeout: 30
+  # Stop a backfill run once the remaining rate limit drops below this value.
+  rate_limit_floor: 2
+
+collection:
+  # Safety cap: max pages fetched per stream per run (100 items/page).
+  # Keep small for anonymous access, raise when a token is configured.
+  max_pages_per_run: 10
+  # Pages of most-recently-updated issues/PRs to rescan each run so that
+  # close/merge state changes are picked up after the initial backfill.
+  refresh_recent_pages: 1
+
+repositories:
+  - owner: langchain-ai
+    name: langgraph
+  - owner: openai
+    name: openai-python

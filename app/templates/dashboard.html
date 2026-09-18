@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>仓库热度监控</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --line:#2a3550; --text:#e6ecf5; --muted:#8b98b0; --accent:#4f8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC",sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  h1 { font-size:18px; margin:0 16px 0 0; font-weight:600; }
+  select,input,button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .spacer { flex:1; }
+  main { padding:20px 24px 60px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:20px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .kpi .label { color:var(--muted); font-size:12px; }
+  .kpi .value { font-size:24px; font-weight:600; margin-top:6px; }
+  .kpi .delta { font-size:12px; margin-top:4px; }
+  .up { color:#37d67a; } .down { color:#ff5c7c; } .flat { color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .card h2 { font-size:14px; margin:4px 8px 8px; font-weight:500; color:var(--muted); }
+  .chart { width:100%; height:320px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .status { font-size:12px; color:var(--muted); }
+  #banner { display:none; margin:0 24px 0; padding:10px 14px; border-radius:8px; background:#3a2530; border:1px solid #6b3346; color:#ffb3c4; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔥 仓库热度监控</h1>
+  <select id="repo"></select>
+  <label class="status">起 <input type="date" id="start" /></label>
+  <label class="status">止 <input type="date" id="end" /></label>
+  <select id="granularity">
+    <option value="daily">按日</option>
+    <option value="weekly">按周</option>
+    <option value="monthly">按月</option>
+  </select>
+  <button id="refresh">刷新</button>
+  <button id="collect" class="primary">采集数据</button>
+  <div class="spacer"></div>
+  <span class="status" id="meta"></span>
+</header>
+<div id="banner"></div>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <div class="grid">
+    <div class="card"><h2>Star / Fork 累计趋势</h2><div class="chart" id="c-stars-forks"></div></div>
+    <div class="card"><h2>每日新增 Star / Fork</h2><div class="chart" id="c-new-stars-forks"></div></div>
+    <div class="card"><h2>Issue 开 / 关 / 未关闭</h2><div class="chart" id="c-issues"></div></div>
+    <div class="card"><h2>PR 开 / 关 / 合并 / 未关闭</h2><div class="chart" id="c-prs"></div></div>
+    <div class="card"><h2>Commit 活跃度</h2><div class="chart" id="c-commits"></div></div>
+    <div class="card"><h2>Contributors 增长</h2><div class="chart" id="c-contributors"></div></div>
+    <div class="card"><h2>Release 累计</h2><div class="chart" id="c-releases"></div></div>
+    <div class="card"><h2>最近动态</h2><div style="max-height:320px;overflow:auto"><table id="events"><thead><tr><th>时间</th><th>类型</th><th>用户</th><th>标题</th></tr></thead><tbody></tbody></table></div></div>
+  </div>
+</main>
+
+<script>
+const CHARTS = {};
+const PALETTE = ['#4f8cff','#37d67a','#ffb020','#ff5c7c','#a06bff','#26c6da'];
+// [metric, label, mode]  mode: 'total' = 存量(显示 end + 区间变化), 'flow' = 区间新增(显示 total)
+const KPI_DEFS = [
+  ['stars_total','⭐ Stars','total'], ['forks_total','🍴 Forks','total'],
+  ['issues_open','🐛 Open Issues','total'], ['prs_open','PR Open','total'],
+  ['contributors_total','Contributors','total'], ['releases_total','Releases','total'],
+  ['commits','Commits (区间)','flow'], ['stars_new','新增 Stars (区间)','flow']
+];
+let REPOS = [];
+
+function initChart(id) {
+  const el = document.getElementById(id);
+  const chart = echarts.init(el, null, { renderer: 'canvas' });
+  CHARTS[id] = chart;
+  return chart;
+}
+
+async function api(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  return res.json();
+}
+
+function showBanner(msg) {
+  const b = document.getElementById('banner');
+  if (!msg) { b.style.display = 'none'; return; }
+  b.textContent = msg; b.style.display = 'block';
+}
+
+function fmt(n) { return (n === null || n === undefined) ? '-' : Number(n).toLocaleString(); }
+function deltaClass(v) { return v > 0 ? 'up' : v < 0 ? 'down' : 'flat'; }
+function deltaText(v) { return (v > 0 ? '+' : '') + fmt(v); }
+
+function lineSeries(name, points, color, type='line') {
+  return {
+    name, type, smooth: true, showSymbol: false,
+    lineStyle: { width: 2 }, itemStyle: { color },
+    areaStyle: type === 'line' ? { opacity: 0.08 } : undefined,
+    data: points.map(p => [p.date, p.value])
+  };
+}
+function barSeries(name, points, color) {
+  return { name, type: 'bar', stack: undefined, itemStyle: { color }, data: points.map(p => [p.date, p.value]) };
+}
+function baseOption(series) {
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, textStyle: { color: '#8b98b0' } },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', axisLine: { lineStyle: { color: '#2a3550' } }, axisLabel: { color: '#8b98b0' } },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#212b42' } }, axisLabel: { color: '#8b98b0' } },
+    series
+  };
+}
+
+function renderKpis(summary) {
+  const el = document.getElementById('kpis');
+  el.innerHTML = KPI_DEFS.map(([key, label, mode]) => {
+    const item = summary[key] || { end: null, delta: 0, total: 0 };
+    if (mode === 'flow') {
+      return `<div class="kpi">
+        <div class="label">${label}</div>
+        <div class="value">${fmt(item.total)}</div>
+        <div class="delta flat">区间累计</div>
+      </div>`;
+    }
+    return `<div class="kpi">
+      <div class="label">${label}</div>
+      <div class="value">${fmt(item.end)}</div>
+      <div class="delta ${deltaClass(item.delta)}">${deltaText(item.delta)} 区间</div>
+    </div>`;
+  }).join('');
+}
+
+function renderEvents(events) {
+  const tbody = document.querySelector('#events tbody');
+  tbody.innerHTML = events.map(e => {
+    const time = e.occurred_at ? e.occurred_at.slice(0, 10) : '-';
+    const title = (e.title || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])).slice(0, 60);
+    return `<tr><td>${time}</td><td>${e.type}</td><td>${e.actor || '-'}</td><td>${title}</td></tr>`;
+  }).join('');
+}
+
+async function load() {
+  const full = document.getElementById('repo').value;
+  if (!full) return;
+  const [owner, name] = full.split('/');
+  const params = new URLSearchParams();
+  const start = document.getElementById('start').value;
+  const end = document.getElementById('end').value;
+  const granularity = document.getElementById('granularity').value;
+  if (start) params.set('start', start);
+  if (end) params.set('end', end);
+  params.set('granularity', granularity);
+  const base = `/api/repos/${owner}/${name}`;
+
+  try {
+    showBanner('');
+    const [summaryRes, tsRes, eventsRes] = await Promise.all([
+      api(`${base}/summary?${params}`),
+      api(`${base}/timeseries?${params}`),
+      api(`${base}/events/recent?limit=40`)
+    ]);
+    const s = tsRes.series;
+    renderKpis(summaryRes.summary);
+    renderEvents(eventsRes.events);
+
+    const first = (s.stars_total || [])[0]?.date || '-';
+    const last = (s.stars_total || []).slice(-1)[0]?.date || '-';
+    document.getElementById('meta').textContent = `${granularity} · ${first} → ${last}`;
+
+    CHARTS['c-stars-forks'].setOption(baseOption([
+      lineSeries('Stars', s.stars_total || [], PALETTE[0]),
+      lineSeries('Forks', s.forks_total || [], PALETTE[1])
+    ]), true);
+    CHARTS['c-new-stars-forks'].setOption(baseOption([
+      barSeries('新增 Stars', s.stars_new || [], PALETTE[0]),
+      barSeries('新增 Forks', s.forks_new || [], PALETTE[1])
+    ]), true);
+    CHARTS['c-issues'].setOption(baseOption([
+      barSeries('新开', s.issues_opened || [], PALETTE[2]),
+      barSeries('关闭', s.issues_closed || [], PALETTE[3]),
+      lineSeries('未关闭', s.issues_open || [], PALETTE[4])
+    ]), true);
+    CHARTS['c-prs'].setOption(baseOption([
+      barSeries('新开', s.prs_opened || [], PALETTE[2]),
+      barSeries('关闭', s.prs_closed || [], PALETTE[3]),
+      barSeries('合并', s.prs_merged || [], PALETTE[5]),
+      lineSeries('未关闭', s.prs_open || [], PALETTE[0])
+    ]), true);
+    CHARTS['c-commits'].setOption(baseOption([
+      barSeries('Commits', s.commits || [], PALETTE[5])
+    ]), true);
+    CHARTS['c-contributors'].setOption(baseOption([
+      lineSeries('Contributors', s.contributors_total || [], PALETTE[4])
+    ]), true);
+    CHARTS['c-releases'].setOption(baseOption([
+      lineSeries('Release 累计', s.releases_total || [], PALETTE[1])
+    ]), true);
+  } catch (err) {
+    showBanner('加载失败: ' + err.message);
+  }
+}
+
+async function collect() {
+  const btn = document.getElementById('collect');
+  btn.disabled = true; btn.textContent = '采集中…';
+  try {
+    await fetch('/api/collect', { method: 'POST' });
+    let running = true;
+    while (running) {
+      await new Promise(r => setTimeout(r, 2500));
+      const st = await api('/api/collect/status');
+      running = st.running;
+      if (st.last_error) showBanner('采集出错: ' + st.last_error);
+    }
+    await load();
+  } catch (err) {
+    showBanner('采集失败: ' + err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '采集数据';
+  }
+}
+
+async function boot() {
+  Object.keys({ 'c-stars-forks':1,'c-new-stars-forks':1,'c-issues':1,'c-prs':1,'c-commits':1,'c-contributors':1,'c-releases':1 }).forEach(initChart);
+  REPOS = await api('/api/repos');
+  const sel = document.getElementById('repo');
+  sel.innerHTML = REPOS.map(r => `<option value="${r.full_name}">${r.full_name}</option>`).join('');
+  if (REPOS.length) sel.value = REPOS[0].full_name;
+  sel.addEventListener('change', load);
+  document.getElementById('refresh').addEventListener('click', load);
+  document.getElementById('collect').addEventListener('click', collect);
+  document.getElementById('granularity').addEventListener('change', load);
+  document.getElementById('start').addEventListener('change', load);
+  document.getElementById('end').addEventListener('change', load);
+  window.addEventListener('resize', () => Object.values(CHARTS).forEach(c => c.resize()));
+  if (REPOS.length) await load();
+}
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+name: Collect GitHub metrics
+
+on:
+  schedule:
+    # GitHub Actions cron is UTC. 02:00 / 09:00 UTC == 10:00 / 17:00 Beijing (UTC+8).
+    - cron: "0 2 * * *"
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: collect-metrics
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore database from data branch
+        run: |
+          mkdir -p data
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git fetch origin data --depth=1
+            git show origin/data:data/monitoring.db > data/monitoring.db
+            echo "Restored database from data branch."
+          else
+            echo "No data branch yet; starting a fresh database."
+          fi
+
+      - name: Collect metrics
+        env:
+          # Prefer a dedicated PAT secret; fall back to the default Actions token.
+          GITHUB_TOKEN: ${{ secrets.GH_MONITOR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: python scripts/collect.py --verbose
+
+      - name: Persist database to data branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Move the freshly collected DB out of the working tree so switching
+          # branches cannot clobber it, then restore it after checkout.
+          mkdir -p /tmp/dbout
+          cp data/monitoring.db /tmp/dbout/monitoring.db
+          rm -f data/monitoring.db
+
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git fetch origin data
+            git checkout -B data origin/data
+          else
+            git checkout --orphan data
+            git rm -rf --cached . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p data
+          cp /tmp/dbout/monitoring.db data/monitoring.db
+          git add -f data/monitoring.db
+
+          if git diff --cached --quiet; then
+            echo "No database changes to persist."
+          else
+            git commit -m "data: snapshot $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git push origin data
+          fi
