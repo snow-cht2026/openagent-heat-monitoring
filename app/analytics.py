@@ -152,9 +152,10 @@ def _open_series(opened: pd.Series, closed: pd.Series, index: pd.DatetimeIndex) 
     return open_counts.reindex(index, method="ffill").fillna(0.0)
 
 
-def _snapshot_series(
+def _snapshot_daily(
     snapshots: pd.DataFrame | None, column: str, index: pd.DatetimeIndex
 ) -> pd.Series | None:
+    """Daily forward-filled snapshot values covering the requested window."""
     if snapshots is None or snapshots.empty or column not in snapshots.columns:
         return None
     points = (
@@ -166,8 +167,37 @@ def _snapshot_series(
     if points.empty:
         return None
     daily = pd.date_range(points.index.min(), max(points.index.max(), index[-1]), freq="D", tz="UTC")
-    daily_values = points.reindex(daily).ffill().bfill()
-    return daily_values.reindex(index, method="ffill").fillna(daily_values.iloc[0])
+    return points.reindex(daily).ffill().bfill()
+
+
+def _snapshot_series(
+    snapshots: pd.DataFrame | None, column: str, index: pd.DatetimeIndex
+) -> pd.Series | None:
+    daily = _snapshot_daily(snapshots, column, index)
+    if daily is None:
+        return None
+    return daily.reindex(index, method="ffill").fillna(daily.iloc[0])
+
+
+def _snapshot_new_series(
+    snapshots: pd.DataFrame | None,
+    column: str,
+    index: pd.DatetimeIndex,
+    granularity: str,
+) -> pd.Series | None:
+    """Derive per-bucket increments from day-over-day snapshot changes.
+
+    Used when event-level history is unavailable (e.g. /stargazers restricted
+    for third-party repositories).
+    """
+    daily = _snapshot_daily(snapshots, column, index)
+    if daily is None:
+        return None
+    deltas = daily.diff().fillna(0.0).clip(lower=0.0)
+    keys = deltas.index.map(lambda ts: _bucket_start(ts, granularity))
+    grouped = deltas.groupby(keys).sum()
+    grouped.index = pd.DatetimeIndex(grouped.index)
+    return grouped.reindex(index, fill_value=0.0).astype(float)
 
 
 def _contributor_growth(
@@ -202,6 +232,18 @@ def build_series(
         metric: _counts_in_buckets(events, event_type, column, index, granularity)
         for metric, (event_type, column) in NEW_METRICS.items()
     }
+
+    # Flow metrics without event history (notably stars, whose endpoint is
+    # restricted for third-party repos) are reconstructed from snapshot deltas.
+    for flow_metric, snapshot_column in (
+        ("stars_new", "stars"),
+        ("forks_new", "forks"),
+        ("releases_new", "total_releases"),
+    ):
+        if new_series[flow_metric].sum() == 0:
+            fallback = _snapshot_new_series(snapshots, snapshot_column, index, granularity)
+            if fallback is not None:
+                new_series[flow_metric] = fallback
 
     # Cumulative totals prefer full event history; fall back to daily snapshots
     # (needed for stars without a token, since /stargazers now requires auth).

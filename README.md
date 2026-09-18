@@ -8,7 +8,8 @@ GitHub API **不提供历史 Star/Fork 数量**，因此本项目采用两条腿
 
 1. **回溯重建（backfill）**：利用带时间戳的明细接口重建历史
    - Stars：`/stargazers` + `Accept: application/vnd.github.star+json` → `starred_at`
-     - ⚠️ 该端点**现在必须携带 token**，匿名访问返回 401。无 token 时该流标记为 `auth_required`，Star 总量改由每日快照提供。
+     - ⚠️ 该端点已受限：匿名 401；fine-grained PAT 403；**classic PAT 对第三方仓库也返回 404**（仅自己名下/协作仓库可访问，GraphQL 同样返回 `totalCount: 0`）。
+     - 因此对第三方仓库，Star 历史改由**每日快照差值**还原：`stars_total` 用快照值，`stars_new` 用相邻两日快照的差值。
    - Forks：`/forks?sort=oldest` → `created_at`
    - Issues / PRs：`/issues?state=all`、`/pulls?state=all` → `created_at` / `closed_at` / `merged_at`
    - Commits：`/commits` → `commit.author.date`
@@ -43,15 +44,21 @@ python scripts/collect.py
 
 匿名访问限流严格，`config.yaml` 中 `collection.max_pages_per_run` 默认 10，即每次运行每个数据流最多抓 10 页（1000 条）。多次运行 `collect.py` 会从断点继续，直至回溯完成。
 
-### Token 类型很重要
+### Token 类型与 `/stargazers` 限制
 
-| Token 类型 | 限流 | `/stargazers`（Star 历史） |
-| --- | --- | --- |
-| 匿名 | 60/h | ❌ 401 |
-| Fine-grained PAT | 5000/h | ❌ 403 `Resource not accessible by personal access token` |
-| **Classic PAT**（勾选 `public_repo`） | 5000/h | ✅ 可用 |
+| Token 类型 | 限流 | 第三方仓库 `/stargazers` | 自己名下仓库 |
+| --- | --- | --- | --- |
+| 匿名 | 60/h | ❌ 401 | ❌ 401 |
+| Fine-grained PAT | 5000/h | ❌ 403 | ❌ 403 |
+| Classic PAT（`public_repo`） | 5000/h | ❌ 404 | ✅ 200 |
 
-> 想要完整的 Star 历史回溯，请使用 **Classic PAT**。Fine-grained PAT 目前无法访问 starring/subscribers 端点，此时 `stars` 流会标记为 `permission_denied` 并自动降级为每日快照记录 Star 总量，其余指标不受影响。
+> GitHub 已限制 `stargazers` / `subscribers` 端点：**只有仓库所有者/协作者能访问**，对第三方公开仓库一律 404（GraphQL 静默返回 `totalCount: 0`）。这与 token 类型无关，无法通过换 token 绕过。
+>
+> 因此：
+> - **第三方仓库**：Star 历史只能靠每日快照累积，`stars_new` 由快照差值计算，`stars` 流标记为 `not_found`（不影响其他指标）。
+> - **自己名下仓库**：Classic PAT 可完整回溯 Star 历史。
+>
+> 用 `python scripts/diagnose.py` 可以确认具体仓库的可用性。
 
 ## 配置说明（config.yaml）
 

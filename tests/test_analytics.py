@@ -3,8 +3,8 @@ from datetime import date, datetime, timezone
 import pytest
 from sqlalchemy.orm import Session
 
-from app.analytics import build_series, summarize
-from app.database import Base, Event, Repository, build_engine, make_session_factory
+from app.analytics import build_series, load_snapshots, summarize
+from app.database import Base, Event, Repository, Snapshot, build_engine, make_session_factory
 
 
 @pytest.fixture()
@@ -83,6 +83,22 @@ def test_build_series_weekly(session: Session, repo: Repository):
     # Weekly buckets anchored on Mondays: Jan 1, Jan 8, Jan 15, Jan 22, Jan 29
     assert _values(series, "stars_new")[0] == 3
     assert _values(series, "commits")[0] == 3
+
+
+def test_snapshot_fallback_reconstructs_star_flow(session: Session, repo: Repository):
+    session.add_all(
+        [
+            Snapshot(repository_id=repo.id, snapshot_date=date(2024, 1, 1), stars=100),
+            Snapshot(repository_id=repo.id, snapshot_date=date(2024, 1, 3), stars=110),
+        ]
+    )
+    session.commit()
+    snapshots = load_snapshots(session, repo.id)
+    series = build_series(
+        _load(session, repo), 0, date(2024, 1, 1), date(2024, 1, 4), "daily", snapshots
+    )
+    assert _values(series, "stars_total") == [100, 100, 110, 110]
+    assert _values(series, "stars_new") == [0, 0, 10, 0]
 
 
 def test_summarize(session: Session, repo: Repository):
