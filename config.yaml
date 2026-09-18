@@ -12,8 +12,9 @@ github:
 
 collection:
   # Safety cap: max pages fetched per stream per run (100 items/page).
-  # Keep small for anonymous access, raise when a token is configured.
-  max_pages_per_run: 10
+  # Raised to 50 because a token is configured (5000 req/h). Lower to ~2-10
+  # when running anonymously (60 req/h).
+  max_pages_per_run: 50
   # Pages of most-recently-updated issues/PRs to rescan each run so that
   # close/merge state changes are picked up after the initial backfill.
   refresh_recent_pages: 1
