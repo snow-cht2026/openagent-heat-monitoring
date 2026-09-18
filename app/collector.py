@@ -5,6 +5,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
+import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -84,12 +85,24 @@ class Collector:
             except PermissionDenied as exc:
                 logger.warning("skipping %s: %s", stream, exc)
                 streams[stream] = "permission_denied"
+            except FileNotFoundError as exc:
+                logger.warning("skipping %s: %s", stream, exc)
+                streams[stream] = "not_found"
+            except httpx.HTTPStatusError as exc:
+                logger.warning("skipping %s: HTTP %s", stream, exc.response.status_code)
+                streams[stream] = f"http_{exc.response.status_code}"
 
         snapshot = None
         if not rate_limited:
             try:
                 snapshot = self.capture_snapshot(repo.id)
-            except (RateLimitExceeded, AuthenticationRequired, PermissionDenied, FileNotFoundError) as exc:
+            except (
+                RateLimitExceeded,
+                AuthenticationRequired,
+                PermissionDenied,
+                FileNotFoundError,
+                httpx.HTTPStatusError,
+            ) as exc:
                 logger.warning("could not capture snapshot: %s", exc)
 
         return {
@@ -190,6 +203,9 @@ class Collector:
             try:
                 events, has_next = self.client.fetch_recent_updated(stream, owner, name, page)
             except RateLimitExceeded as exc:
+                logger.warning("stopping state refresh for %s: %s", stream, exc)
+                return
+            except (AuthenticationRequired, PermissionDenied, FileNotFoundError, httpx.HTTPStatusError) as exc:
                 logger.warning("stopping state refresh for %s: %s", stream, exc)
                 return
             if not events:

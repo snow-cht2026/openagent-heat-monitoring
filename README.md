@@ -114,6 +114,16 @@ python scripts/collect.py
 0 2,9 * * * cd /path/to/openagent-heat-monitoring && python scripts/collect.py >> data/collect.log 2>&1
 ```
 
+## 诊断 API 访问权限
+
+不同 token 对 `stargazers` 等端点的访问权限不同。采集前可用诊断脚本逐仓库探测：
+
+```bash
+python scripts/diagnose.py
+```
+
+输出每个端点返回的 HTTP 状态，`200` 可用，`401/403/404` 会跳过该数据流（不影响其他指标）。
+
 ## 测试
 
 ```bash

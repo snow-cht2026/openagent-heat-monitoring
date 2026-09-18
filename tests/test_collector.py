@@ -156,6 +156,20 @@ def test_permission_denied_skips_only_that_stream(factory):
     assert result["snapshot"]["stars"] == 10
 
 
+def test_not_found_skips_only_that_stream(factory):
+    client = FakeClient(
+        {"forks": [([{"external_id": "1", "occurred_at": "2024-01-01T00:00:00Z", "actor": "a"}], False)]},
+        errors={"stars": FileNotFoundError("GitHub resource not found: /stargazers")},
+    )
+    settings = _make_settings(max_pages=5)
+    collector = Collector(settings, factory, client=client)
+    result = collector.sync_repository(settings.repositories[0])
+
+    assert result["streams"]["stars"] == "not_found"
+    assert result["streams"]["forks"] == "complete"
+    assert result["snapshot"]["stars"] == 10
+
+
 def test_ensure_tables_is_idempotent(factory):
     settings = _make_settings(max_pages=5)
     ensure_tables(settings, factory)
